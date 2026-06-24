@@ -44,7 +44,7 @@ async function getStudentData(username, password) {
   );
 
   const html = pageResponse.data;
-  
+
   // Load HTML into Cheerio for accurate DOM parsing
   const $ = cheerio.load(html);
 
@@ -131,7 +131,7 @@ app.post("/attendance", async (req, res) => {
     if (data.today.absentSubjects.length > 0 && expoPushToken) {
       if (Expo.isExpoPushToken(expoPushToken)) {
         const subjectsString = data.today.absentSubjects.join(", ");
-        
+
         const messages = [{
           to: expoPushToken,
           sound: "default",
@@ -163,9 +163,19 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
-app.listen(3000, () => {
-  console.log("Server running on port 3000");
+// ADDED: Health check route for browser
+app.get("/", (req, res) => {
+  res.status(200).json({ 
+    success: true,
+    message: "TKRCET Backend is running perfectly!" 
+  });
 });
 
+// CORRECTED: Only listen on a port if running locally
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(3000, () => {
+    console.log("Server running on port 3000");
+  });
+}
 
 module.exports = app;
