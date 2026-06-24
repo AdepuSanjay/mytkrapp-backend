@@ -250,4 +250,28 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+
+
+// --- MANUAL TEST ROUTE ---
+app.get("/test-alerts", async (req, res) => {
+  console.log("🛠️ Manual push notification test triggered!");
+  
+  if (usersDB.size === 0) {
+    return res.json({ 
+      success: false, 
+      message: "No users in database. You need to log in on the app first!" 
+    });
+  }
+
+  // Force the background job to run right now
+  await runAttendanceAlerts();
+  
+  res.json({ 
+    success: true, 
+    message: "Test alerts triggered successfully! Check your server console and your phone." 
+  });
+});
+
+
+
 module.exports = app;
