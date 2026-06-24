@@ -4,14 +4,15 @@ const cheerio = require("cheerio");
 const { Expo } = require("expo-server-sdk");
 
 const app = express();
-;
+
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-app.use(express.json())
+app.use(express.json()); 
+
 // Initialize Expo SDK
 const expo = new Expo();
 
