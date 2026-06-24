@@ -3,6 +3,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const cors = require("cors");
 const { Expo } = require("expo-server-sdk");
+const cron = require("node-cron"); // <-- NEW: Added for scheduling
 
 const app = express();
 
@@ -16,6 +17,11 @@ app.use(express.json());
 
 // Initialize Expo SDK
 const expo = new Expo();
+
+// --- MOCK DATABASE (For Testing) ---
+// In a real app, replace this with MongoDB or Firebase
+// We use a Map so if the same user logs in again, it just updates their token
+const usersDB = new Map();
 
 async function getStudentData(username, password) {
   // 1. LOGIN
@@ -52,8 +58,6 @@ async function getStudentData(username, password) {
   );
 
   const html = pageResponse.data;
-
-  // Load HTML into Cheerio for accurate DOM parsing
   const $ = cheerio.load(html);
 
   // 3. PROFILE & BASIC INFO PARSING
@@ -75,11 +79,8 @@ async function getStudentData(username, password) {
   const profile = {
     name: extractField('Name:'),
     rollNo: extractField('Roll No:'),
-    fatherName: extractField('Father Name:'),
     course: extractField('Course:'),
-    year: extractField('Year:'),
     section: extractField('Section:'),
-    mobile: extractField('Student Mobile:'),
     photoUrl: photoUrl || null
   };
 
@@ -87,23 +88,22 @@ async function getStudentData(username, password) {
   const text = html.replace(/<[^>]*>/g, " ");
   const percentageMatch = text.match(/(\d+\.\d+)%/);
   const percentage = percentageMatch ? percentageMatch[1] + "%" : "";
-  
-  const attendanceMatch = text.match(
-    /Attendance[\s\S]*?(\d+)\s+(\d+)\s+(\d+)\s+(\d+\.\d+)%/
-  );
+
+  const attendanceMatch = text.match(/Attendance[\s\S]*?(\d+)\s+(\d+)\s+(\d+)\s+(\d+\.\d+)%/);
   const conducted = attendanceMatch?.[1] || "";
   const present = attendanceMatch?.[2] || "";
   const absent = attendanceMatch?.[3] || "";
 
-  // 5. TODAY'S DETAILED PARSING (Now includes specific periods list)
+  // 5. TODAY'S DETAILED PARSING
   const dateMatch = html.match(/Today's Attendance :: Date: (\d{2}-\d{2}-\d{4})/);
   const todayDate = dateMatch ? dateMatch[1] : null;
 
+  let presentSubjects = []; // <-- NEW: Tracking present subjects
   let absentSubjects = [];
   let todayPresentCount = 0;
   let todayAbsentCount = 0;
   let totalScheduledPeriods = 0;
-  let todayPeriodsList = []; // Array to hold individual period data for the frontend
+  let todayPeriodsList = []; 
 
   if (todayDate) {
     const dateTd = $('td').filter(function() {
@@ -112,7 +112,7 @@ async function getStudentData(username, password) {
 
     if (dateTd.length > 0) {
       const todayRow = dateTd.parent('tr');
-      const periodCells = todayRow.find('td').slice(2); // Skip Date and Weekday
+      const periodCells = todayRow.find('td').slice(2); 
 
       periodCells.each((index, element) => {
         const cell = $(element);
@@ -122,7 +122,6 @@ async function getStudentData(username, password) {
         let status = null;
         let subject = null;
 
-        // Check if marked present or absent
         if (cellText.includes('Present')) {
           status = 'Present';
           todayPresentCount += colSpan;
@@ -131,24 +130,20 @@ async function getStudentData(username, password) {
           todayAbsentCount += colSpan;
         }
 
-        // If a status was found, extract subject and add to list
         if (status) {
           totalScheduledPeriods += colSpan;
-          
           const subjectMatch = cellText.match(/\((.*?)\)/);
           if (subjectMatch && subjectMatch[1]) {
             subject = subjectMatch[1].trim();
-            
-            if (status === 'Absent') {
-              absentSubjects.push(subject);
-            }
+
+            if (status === 'Absent') absentSubjects.push(subject);
+            if (status === 'Present') presentSubjects.push(subject);
           }
 
-          // Push the detailed object for your frontend to map over
           todayPeriodsList.push({
             subject: subject || 'Unknown',
             status: status,
-            colspan: colSpan // Lets frontend know if it's a 1-hour class or 3-hour lab
+            colspan: colSpan 
           });
         }
       });
@@ -157,76 +152,101 @@ async function getStudentData(username, password) {
 
   return {
     profile, 
-    overallAttendance: {
-      conducted,
-      present,
-      absent,
-      percentage,
-    },
+    overallAttendance: { conducted, present, absent, percentage },
     today: {
       date: todayDate,
       totalScheduledPeriods: totalScheduledPeriods || 6,
       periodsTaken: todayPresentCount + todayAbsentCount,
-      presentPeriods: todayPresentCount,
-      absentPeriods: todayAbsentCount,
+      presentSubjects: presentSubjects, // <-- Added here
       absentSubjects: absentSubjects,
-      periodsList: todayPeriodsList // <--- NEW: Iterate over this in React Native!
+      periodsList: todayPeriodsList 
     },
   };
 }
 
+// --- BACKGROUND CRON JOB LOGIC ---
+async function runAttendanceAlerts() {
+  console.log(`\n⏰ Running Scheduled Attendance Checks... (${new Date().toLocaleTimeString()})`);
+  
+  // Loop through everyone saved in our mock DB
+  for (const [username, user] of usersDB.entries()) {
+    try {
+      if (!Expo.isExpoPushToken(user.expoPushToken)) continue;
+
+      const data = await getStudentData(user.username, user.password);
+      
+      // Remove duplicate subject names (e.g., 2 periods of Math just shows "Math")
+      const uniquePresent = [...new Set(data.today.presentSubjects)].join(", ") || "None";
+      const uniqueAbsent = [...new Set(data.today.absentSubjects)].join(", ") || "None";
+      const overall = data.overallAttendance.percentage;
+
+      // Construct the clean notification body
+      const notificationBody = `Overall: ${overall}\n✅ Present: ${uniquePresent}\n❌ Absent: ${uniqueAbsent}`;
+
+      const messages = [{
+        to: user.expoPushToken,
+        sound: "default",
+        title: "📊 Attendance Summary",
+        body: notificationBody,
+      }];
+
+      await expo.sendPushNotificationsAsync(messages);
+      console.log(`✅ Alert sent to ${username}`);
+
+      // ⚠️ CRITICAL: Wait 2 seconds before checking the next student to prevent college server bans
+      await new Promise(resolve => setTimeout(resolve, 2000)); 
+
+    } catch (error) {
+      console.error(`❌ Failed background check for ${username}:`, error.message);
+    }
+  }
+}
+
+// 🕒 SCHEDULE THE CRON JOBS (IST Timezone)
+// Runs at 12:40 PM every day
+cron.schedule("40 12 * * *", () => {
+  runAttendanceAlerts();
+}, { timezone: "Asia/Kolkata" });
+
+// Runs at 4:00 PM every day
+cron.schedule("0 16 * * *", () => {
+  runAttendanceAlerts();
+}, { timezone: "Asia/Kolkata" });
+
+
+// --- ROUTES ---
 app.post("/attendance", async (req, res) => {
   try {
     const { username, password, expoPushToken } = req.body;
 
+    // Fetch data to ensure credentials work and to send back to the app UI
     const data = await getStudentData(username, password);
 
-    // --- PUSH NOTIFICATION LOGIC ---
-    if (data.today.absentSubjects.length > 0 && expoPushToken) {
-      if (Expo.isExpoPushToken(expoPushToken)) {
-        const subjectsString = data.today.absentSubjects.join(", ");
-
-        const messages = [{
-          to: expoPushToken,
-          sound: "default",
-          title: "Attendance Alert ⚠️",
-          body: `You were marked absent today for: ${subjectsString}.`,
-          data: { absentSubjects: data.today.absentSubjects },
-        }];
-
-        try {
-          const chunks = expo.chunkPushNotifications(messages);
-          for (let chunk of chunks) {
-            await expo.sendPushNotificationsAsync(chunk);
-          }
-          console.log(`Notification sent for absent periods: ${subjectsString}`);
-        } catch (error) {
-          console.error("Error sending push notification:", error);
-        }
-      } else {
-        console.error(`Push token ${expoPushToken} is not a valid Expo push token`);
-      }
+    // Save/Update user in our test DB if they provided a valid Expo token
+    if (expoPushToken && Expo.isExpoPushToken(expoPushToken)) {
+      usersDB.set(username, { username, password, expoPushToken });
+      console.log(`💾 User ${username} registered for automated alerts.`);
     }
+
+    // Notice: We don't send the push notification here anymore! 
+    // It is exclusively handled by the Cron jobs now.
 
     res.json({ success: true, data });
   } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
 app.get("/", (req, res) => {
   res.status(200).json({ 
     success: true,
-    message: "TKRCET Backend is running perfectly!" 
+    message: "TKRCET Automated Backend is Running!" 
   });
 });
 
 if (process.env.NODE_ENV !== 'production') {
   app.listen(3000, () => {
-    console.log("Server running on port 3000");
+    console.log("🚀 Server running on port 3000 with Cron Jobs enabled");
   });
 }
 
