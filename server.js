@@ -48,14 +48,28 @@ async function getStudentData(username, password) {
   // Load HTML into Cheerio for accurate DOM parsing
   const $ = cheerio.load(html);
 
-  // 3. BASIC INFO PARSING
-  const text = html.replace(/<[^>]*>/g, " ");
-  const rollNo = text.match(/Roll No:\s*([A-Z0-9]+)/i)?.[1] || "";
-  const name = text.match(/Name:\s*([A-Za-z ]+)/)?.[1]?.trim() || "";
-  const percentageMatch = text.match(/(\d+\.\d+)%/);
-  const percentage = percentageMatch ? percentageMatch[1] + "%" : "";
+  // 3. PROFILE & BASIC INFO PARSING (Upgraded to Cheerio)
+  const relativePhotoPath = $('img[alt="Student Photo"]').attr('src');
+  const photoUrl = relativePhotoPath && !relativePhotoPath.includes('http') 
+    ? `http://103.171.190.44/TKRCET/${relativePhotoPath}` 
+    : relativePhotoPath;
+
+  const profile = {
+    name: $('p:contains("Name:")').text().replace(/Name:\s*/i, '').trim() || "",
+    rollNo: $('p:contains("Roll No:")').text().replace(/Roll No:\s*/i, '').replace(/&nbsp;/g, '').trim() || "",
+    fatherName: $('p:contains("Father Name:")').text().replace(/Father Name:\s*/i, '').trim() || "",
+    course: $('p:contains("Course:")').text().replace(/Course:\s*/i, '').replace(/&nbsp;/g, '').trim() || "",
+    year: $('p:contains("Year:")').text().replace(/Year:\s*/i, '').trim() || "",
+    section: $('p:contains("Section:")').text().replace(/Section:\s*/i, '').trim() || "",
+    mobile: $('p:contains("Student Mobile:")').text().replace(/Student Mobile:\s*/i, '').replace(/&nbsp;/g, '').trim() || "",
+    photoUrl: photoUrl || null
+  };
 
   // 4. OVERALL ATTENDANCE
+  const text = html.replace(/<[^>]*>/g, " ");
+  const percentageMatch = text.match(/(\d+\.\d+)%/);
+  const percentage = percentageMatch ? percentageMatch[1] + "%" : "";
+  
   const attendanceMatch = text.match(
     /Attendance[\s\S]*?(\d+)\s+(\d+)\s+(\d+)\s+(\d+\.\d+)%/
   );
@@ -63,7 +77,7 @@ async function getStudentData(username, password) {
   const present = attendanceMatch?.[2] || "";
   const absent = attendanceMatch?.[3] || "";
 
-  // 5. TODAY'S DETAILED ABSENCE PARSING (Corrected with Cheerio)
+  // 5. TODAY'S DETAILED ABSENCE PARSING
   const dateMatch = html.match(/Today's Attendance :: Date: (\d{2}-\d{2}-\d{4})/);
   const todayDate = dateMatch ? dateMatch[1] : null;
 
@@ -72,20 +86,15 @@ async function getStudentData(username, password) {
   let todayAbsentCount = 0;
 
   if (todayDate) {
-    // Find the specific table cell (td) that EXACTLY matches today's date
     const dateTd = $('td').filter(function() {
       return $(this).text().trim() === todayDate;
     }).first();
 
     if (dateTd.length > 0) {
-      // Get the parent row (tr) of this date cell in the Daywise table
       const todayRow = dateTd.parent('tr');
-
-      // The first 2 cells are Date and Weekday. The periods start from index 2.
       const periodCells = todayRow.find('td').slice(2);
 
       periodCells.each((index, element) => {
-        // Get the text inside the cell, clean up extra spaces (e.g., "Present (EDA)")
         const cellText = $(element).text().replace(/\s+/g, ' ').trim();
 
         if (cellText.includes('Present')) {
@@ -93,7 +102,6 @@ async function getStudentData(username, password) {
         } else if (cellText.includes('Absent')) {
           todayAbsentCount++;
 
-          // Extract the subject name sitting inside the parenthesis
           const subjectMatch = cellText.match(/\((.*?)\)/);
           if (subjectMatch && subjectMatch[1]) {
             absentSubjects.push(subjectMatch[1].trim());
@@ -104,8 +112,7 @@ async function getStudentData(username, password) {
   }
 
   return {
-    rollNo,
-    name,
+    profile, // Contains Roll No, Name, Photo, Course, etc.
     overallAttendance: {
       conducted,
       present,
@@ -116,7 +123,7 @@ async function getStudentData(username, password) {
       date: todayDate,
       presentPeriods: todayPresentCount,
       absentPeriods: todayAbsentCount,
-      absentSubjects: absentSubjects, // e.g., ["ESD", "CC"]
+      absentSubjects: absentSubjects,
     },
   };
 }
@@ -163,7 +170,6 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
-// ADDED: Health check route for browser
 app.get("/", (req, res) => {
   res.status(200).json({ 
     success: true,
@@ -171,7 +177,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// CORRECTED: Only listen on a port if running locally
 if (process.env.NODE_ENV !== 'production') {
   app.listen(3000, () => {
     console.log("Server running on port 3000");
