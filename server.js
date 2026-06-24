@@ -48,13 +48,12 @@ async function getStudentData(username, password) {
   // Load HTML into Cheerio for accurate DOM parsing
   const $ = cheerio.load(html);
 
-  // 3. PROFILE & BASIC INFO PARSING (Fixed Name Collision)
+  // 3. PROFILE & BASIC INFO PARSING
   const relativePhotoPath = $('img[alt="Student Photo"]').attr('src');
   const photoUrl = relativePhotoPath && !relativePhotoPath.includes('http') 
     ? `http://103.171.190.44/TKRCET/${relativePhotoPath}` 
     : relativePhotoPath;
 
-  // Helper function to extract text exactly matching the strong label
   const extractField = (label) => {
     let val = "";
     $('strong').each((i, el) => {
@@ -88,7 +87,7 @@ async function getStudentData(username, password) {
   const present = attendanceMatch?.[2] || "";
   const absent = attendanceMatch?.[3] || "";
 
-  // 5. TODAY'S DETAILED ABSENCE PARSING (Added colSpan check & periods stats)
+  // 5. TODAY'S DETAILED PARSING (Now includes specific periods list)
   const dateMatch = html.match(/Today's Attendance :: Date: (\d{2}-\d{2}-\d{4})/);
   const todayDate = dateMatch ? dateMatch[1] : null;
 
@@ -96,6 +95,7 @@ async function getStudentData(username, password) {
   let todayPresentCount = 0;
   let todayAbsentCount = 0;
   let totalScheduledPeriods = 0;
+  let todayPeriodsList = []; // Array to hold individual period data for the frontend
 
   if (todayDate) {
     const dateTd = $('td').filter(function() {
@@ -109,24 +109,39 @@ async function getStudentData(username, password) {
       periodCells.each((index, element) => {
         const cell = $(element);
         const cellText = cell.text().replace(/\s+/g, ' ').trim();
-        
-        // Ensure labs (colspan="3") are counted as 3 periods, not 1
         const colSpan = parseInt(cell.attr('colspan') || '1', 10);
 
-        if (cellText.includes('Present') || cellText.includes('Absent') || cellText !== '--') {
-           totalScheduledPeriods += colSpan;
-        }
+        let status = null;
+        let subject = null;
 
+        // Check if marked present or absent
         if (cellText.includes('Present')) {
+          status = 'Present';
           todayPresentCount += colSpan;
         } else if (cellText.includes('Absent')) {
+          status = 'Absent';
           todayAbsentCount += colSpan;
+        }
 
-          // Extract the subject name sitting inside the parenthesis
+        // If a status was found, extract subject and add to list
+        if (status) {
+          totalScheduledPeriods += colSpan;
+          
           const subjectMatch = cellText.match(/\((.*?)\)/);
           if (subjectMatch && subjectMatch[1]) {
-            absentSubjects.push(subjectMatch[1].trim());
+            subject = subjectMatch[1].trim();
+            
+            if (status === 'Absent') {
+              absentSubjects.push(subject);
+            }
           }
+
+          // Push the detailed object for your frontend to map over
+          todayPeriodsList.push({
+            subject: subject || 'Unknown',
+            status: status,
+            colspan: colSpan // Lets frontend know if it's a 1-hour class or 3-hour lab
+          });
         }
       });
     }
@@ -142,11 +157,12 @@ async function getStudentData(username, password) {
     },
     today: {
       date: todayDate,
-      totalScheduledPeriods: totalScheduledPeriods || 6, // Typically 6 periods in a day
-      periodsTaken: todayPresentCount + todayAbsentCount, // Periods already marked
+      totalScheduledPeriods: totalScheduledPeriods || 6,
+      periodsTaken: todayPresentCount + todayAbsentCount,
       presentPeriods: todayPresentCount,
       absentPeriods: todayAbsentCount,
       absentSubjects: absentSubjects,
+      periodsList: todayPeriodsList // <--- NEW: Iterate over this in React Native!
     },
   };
 }
