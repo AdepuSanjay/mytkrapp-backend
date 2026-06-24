@@ -48,20 +48,31 @@ async function getStudentData(username, password) {
   // Load HTML into Cheerio for accurate DOM parsing
   const $ = cheerio.load(html);
 
-  // 3. PROFILE & BASIC INFO PARSING (Upgraded to Cheerio)
+  // 3. PROFILE & BASIC INFO PARSING (Fixed Name Collision)
   const relativePhotoPath = $('img[alt="Student Photo"]').attr('src');
   const photoUrl = relativePhotoPath && !relativePhotoPath.includes('http') 
     ? `http://103.171.190.44/TKRCET/${relativePhotoPath}` 
     : relativePhotoPath;
 
+  // Helper function to extract text exactly matching the strong label
+  const extractField = (label) => {
+    let val = "";
+    $('strong').each((i, el) => {
+      if ($(el).text().trim() === label) {
+        val = $(el).parent().text().replace(label, '').replace(/&nbsp;/g, '').trim();
+      }
+    });
+    return val;
+  };
+
   const profile = {
-    name: $('p:contains("Name:")').text().replace(/Name:\s*/i, '').trim() || "",
-    rollNo: $('p:contains("Roll No:")').text().replace(/Roll No:\s*/i, '').replace(/&nbsp;/g, '').trim() || "",
-    fatherName: $('p:contains("Father Name:")').text().replace(/Father Name:\s*/i, '').trim() || "",
-    course: $('p:contains("Course:")').text().replace(/Course:\s*/i, '').replace(/&nbsp;/g, '').trim() || "",
-    year: $('p:contains("Year:")').text().replace(/Year:\s*/i, '').trim() || "",
-    section: $('p:contains("Section:")').text().replace(/Section:\s*/i, '').trim() || "",
-    mobile: $('p:contains("Student Mobile:")').text().replace(/Student Mobile:\s*/i, '').replace(/&nbsp;/g, '').trim() || "",
+    name: extractField('Name:'),
+    rollNo: extractField('Roll No:'),
+    fatherName: extractField('Father Name:'),
+    course: extractField('Course:'),
+    year: extractField('Year:'),
+    section: extractField('Section:'),
+    mobile: extractField('Student Mobile:'),
     photoUrl: photoUrl || null
   };
 
@@ -77,13 +88,14 @@ async function getStudentData(username, password) {
   const present = attendanceMatch?.[2] || "";
   const absent = attendanceMatch?.[3] || "";
 
-  // 5. TODAY'S DETAILED ABSENCE PARSING
+  // 5. TODAY'S DETAILED ABSENCE PARSING (Added colSpan check & periods stats)
   const dateMatch = html.match(/Today's Attendance :: Date: (\d{2}-\d{2}-\d{4})/);
   const todayDate = dateMatch ? dateMatch[1] : null;
 
   let absentSubjects = [];
   let todayPresentCount = 0;
   let todayAbsentCount = 0;
+  let totalScheduledPeriods = 0;
 
   if (todayDate) {
     const dateTd = $('td').filter(function() {
@@ -92,16 +104,25 @@ async function getStudentData(username, password) {
 
     if (dateTd.length > 0) {
       const todayRow = dateTd.parent('tr');
-      const periodCells = todayRow.find('td').slice(2);
+      const periodCells = todayRow.find('td').slice(2); // Skip Date and Weekday
 
       periodCells.each((index, element) => {
-        const cellText = $(element).text().replace(/\s+/g, ' ').trim();
+        const cell = $(element);
+        const cellText = cell.text().replace(/\s+/g, ' ').trim();
+        
+        // Ensure labs (colspan="3") are counted as 3 periods, not 1
+        const colSpan = parseInt(cell.attr('colspan') || '1', 10);
+
+        if (cellText.includes('Present') || cellText.includes('Absent') || cellText !== '--') {
+           totalScheduledPeriods += colSpan;
+        }
 
         if (cellText.includes('Present')) {
-          todayPresentCount++;
+          todayPresentCount += colSpan;
         } else if (cellText.includes('Absent')) {
-          todayAbsentCount++;
+          todayAbsentCount += colSpan;
 
+          // Extract the subject name sitting inside the parenthesis
           const subjectMatch = cellText.match(/\((.*?)\)/);
           if (subjectMatch && subjectMatch[1]) {
             absentSubjects.push(subjectMatch[1].trim());
@@ -112,7 +133,7 @@ async function getStudentData(username, password) {
   }
 
   return {
-    profile, // Contains Roll No, Name, Photo, Course, etc.
+    profile, 
     overallAttendance: {
       conducted,
       present,
@@ -121,6 +142,8 @@ async function getStudentData(username, password) {
     },
     today: {
       date: todayDate,
+      totalScheduledPeriods: totalScheduledPeriods || 6, // Typically 6 periods in a day
+      periodsTaken: todayPresentCount + todayAbsentCount, // Periods already marked
       presentPeriods: todayPresentCount,
       absentPeriods: todayAbsentCount,
       absentSubjects: absentSubjects,
