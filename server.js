@@ -3,7 +3,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const cors = require("cors");
 const { Expo } = require("expo-server-sdk");
-const cron = require("node-cron"); // <-- NEW: Added for scheduling
+const cron = require("node-cron");
 
 const app = express();
 
@@ -19,8 +19,6 @@ app.use(express.json());
 const expo = new Expo();
 
 // --- MOCK DATABASE (For Testing) ---
-// In a real app, replace this with MongoDB or Firebase
-// We use a Map so if the same user logs in again, it just updates their token
 const usersDB = new Map();
 
 async function getStudentData(username, password) {
@@ -60,7 +58,7 @@ async function getStudentData(username, password) {
   const html = pageResponse.data;
   const $ = cheerio.load(html);
 
-  // 3. PROFILE & BASIC INFO PARSING
+  // 3. PROFILE & BASIC INFO PARSING (Contact Details Omitted)
   const relativePhotoPath = $('img[alt="Student Photo"]').attr('src');
   const photoUrl = relativePhotoPath && !relativePhotoPath.includes('http') 
     ? `http://103.171.190.44/TKRCET/${relativePhotoPath}` 
@@ -79,9 +77,12 @@ async function getStudentData(username, password) {
   const profile = {
     name: extractField('Name:'),
     rollNo: extractField('Roll No:'),
+    fatherName: extractField('Father Name:'),
     course: extractField('Course:'),
+    year: extractField('Year:'),
     section: extractField('Section:'),
     photoUrl: photoUrl || null
+    // Intentionally skipped Student/Father/Mother Mobile numbers
   };
 
   // 4. OVERALL ATTENDANCE
@@ -94,99 +95,157 @@ async function getStudentData(username, password) {
   const present = attendanceMatch?.[2] || "";
   const absent = attendanceMatch?.[3] || "";
 
-  // 5. TODAY'S DETAILED PARSING
-  const dateMatch = html.match(/Today's Attendance :: Date: (\d{2}-\d{2}-\d{4})/);
-  const todayDate = dateMatch ? dateMatch[1] : null;
+  // 5. ACADEMIC PROMOTION HISTORY
+  const academicHistory = [];
+  $('th:contains("Academic Year")').closest('table').find('tbody tr').each((i, el) => {
+    const cols = $(el).find('td');
+    if(cols.length >= 7) {
+      // Strips out the mentor's phone number using regex
+      const rawMentor = $(cols[6]).text().trim();
+      const cleanMentor = rawMentor.replace(/\s*-\s*\d{10}/g, '').trim(); 
+      
+      academicHistory.push({
+        sNo: $(cols[0]).text().trim(),
+        academicYear: $(cols[1]).text().trim(),
+        year: $(cols[2]).text().trim(),
+        semester: $(cols[3]).text().trim(),
+        section: $(cols[4]).text().trim(),
+        status: $(cols[5]).text().trim(),
+        mentor: cleanMentor
+      });
+    }
+  });
 
-  let presentSubjects = []; // <-- NEW: Tracking present subjects
-  let absentSubjects = [];
-  let todayPresentCount = 0;
-  let todayAbsentCount = 0;
-  let totalScheduledPeriods = 0;
-  let todayPeriodsList = []; 
+  // 6. WEEKLY CLASS TIMETABLE
+  const weeklyTimetable = [];
+  $('h5:contains("Student Present Class Time Table")').parent().next('table').find('tbody tr').each((i, el) => {
+    const cols = $(el).find('td');
+    const day = $(cols[0]).text().trim();
+    if(day && day !== '--' && day !== 'Staff Details') {
+      const schedule = [];
+      $(cols).slice(1).each((j, td) => {
+        const subject = $(td).text().trim();
+        const colSpan = parseInt($(td).attr('colspan') || '1', 10);
+        if(subject) {
+          schedule.push({ subject, periods: colSpan });
+        }
+      });
+      if(schedule.length > 0) {
+        weeklyTimetable.push({ day, schedule });
+      }
+    }
+  });
 
-  if (todayDate) {
-    const dateTd = $('td').filter(function() {
-      return $(this).text().trim() === todayDate;
-    }).first();
+  // 7. FULL DAY-WISE ATTENDANCE HISTORY (All Days)
+  const fullDaywiseAttendance = [];
+  let todayDetails = null; // We will extract today out of the full list
+  
+  $('p:contains("Daywise Detailed Attendance")').closest('.container-fluid').find('table tbody tr').each((i, el) => {
+    const cols = $(el).find('td');
+    const dateText = $(cols[0]).text().trim();
+    const weekDay = $(cols[1]).text().trim();
+    
+    // Ensure it's a valid date row (DD-MM-YYYY)
+    if (dateText.match(/\d{2}-\d{2}-\d{4}/)) {
+      const periods = [];
+      let rowPresentCount = 0;
+      let rowAbsentCount = 0;
+      let rowTotalPeriods = 0;
 
-    if (dateTd.length > 0) {
-      const todayRow = dateTd.parent('tr');
-      const periodCells = todayRow.find('td').slice(2); 
-
-      periodCells.each((index, element) => {
-        const cell = $(element);
-        const cellText = cell.text().replace(/\s+/g, ' ').trim();
-        const colSpan = parseInt(cell.attr('colspan') || '1', 10);
-
+      $(cols).slice(2).each((j, td) => {
+        const cellText = $(td).text().replace(/\s+/g, ' ').trim();
+        const colSpan = parseInt($(td).attr('colspan') || '1', 10);
+        
         let status = null;
         let subject = null;
 
         if (cellText.includes('Present')) {
           status = 'Present';
-          todayPresentCount += colSpan;
+          rowPresentCount += colSpan;
         } else if (cellText.includes('Absent')) {
           status = 'Absent';
-          todayAbsentCount += colSpan;
+          rowAbsentCount += colSpan;
         }
 
         if (status) {
-          totalScheduledPeriods += colSpan;
+          rowTotalPeriods += colSpan;
           const subjectMatch = cellText.match(/\((.*?)\)/);
           if (subjectMatch && subjectMatch[1]) {
             subject = subjectMatch[1].trim();
-
-            if (status === 'Absent') absentSubjects.push(subject);
-            if (status === 'Present') presentSubjects.push(subject);
           }
 
-          todayPeriodsList.push({
+          periods.push({
             subject: subject || 'Unknown',
             status: status,
-            colspan: colSpan 
+            colSpan: colSpan
           });
         }
       });
+
+      const dayRecord = {
+        date: dateText,
+        weekDay: weekDay,
+        totalPeriods: rowTotalPeriods,
+        presentCount: rowPresentCount,
+        absentCount: rowAbsentCount,
+        periods: periods
+      };
+
+      fullDaywiseAttendance.push(dayRecord);
+      
+      // If this is the most recent (first) row, treat it as "Today" or latest
+      if (i === 0) {
+        todayDetails = dayRecord;
+      }
     }
+  });
+
+  // Isolate subjects for notifications based on the latest recorded day
+  let presentSubjects = [];
+  let absentSubjects = [];
+  if (todayDetails) {
+      todayDetails.periods.forEach(p => {
+          if (p.status === 'Present') presentSubjects.push(p.subject);
+          if (p.status === 'Absent') absentSubjects.push(p.subject);
+      });
   }
 
   return {
     profile, 
     overallAttendance: { conducted, present, absent, percentage },
-    today: {
-      date: todayDate,
-      totalScheduledPeriods: totalScheduledPeriods || 6,
-      periodsTaken: todayPresentCount + todayAbsentCount,
-      presentSubjects: presentSubjects, // <-- Added here
-      absentSubjects: absentSubjects,
-      periodsList: todayPeriodsList 
+    academicHistory,
+    weeklyTimetable,
+    latestDay: {
+      date: todayDetails?.date || null,
+      totalScheduledPeriods: todayDetails?.totalPeriods || 0,
+      presentSubjects: [...new Set(presentSubjects)], 
+      absentSubjects: [...new Set(absentSubjects)],
+      periodsList: todayDetails?.periods || []
     },
+    historicalAttendance: fullDaywiseAttendance 
   };
 }
 
 // --- BACKGROUND CRON JOB LOGIC ---
 async function runAttendanceAlerts() {
   console.log(`\n⏰ Running Scheduled Attendance Checks... (${new Date().toLocaleTimeString()})`);
-  
-  // Loop through everyone saved in our mock DB
+
   for (const [username, user] of usersDB.entries()) {
     try {
       if (!Expo.isExpoPushToken(user.expoPushToken)) continue;
 
       const data = await getStudentData(user.username, user.password);
-      
-      // Remove duplicate subject names (e.g., 2 periods of Math just shows "Math")
-      const uniquePresent = [...new Set(data.today.presentSubjects)].join(", ") || "None";
-      const uniqueAbsent = [...new Set(data.today.absentSubjects)].join(", ") || "None";
+
+      const uniquePresent = data.latestDay.presentSubjects.join(", ") || "None";
+      const uniqueAbsent = data.latestDay.absentSubjects.join(", ") || "None";
       const overall = data.overallAttendance.percentage;
 
-      // Construct the clean notification body
       const notificationBody = `Overall: ${overall}\n✅ Present: ${uniquePresent}\n❌ Absent: ${uniqueAbsent}`;
 
       const messages = [{
         to: user.expoPushToken,
         sound: "default",
-        title: "📊 Attendance Summary",
+        title: `📊 Attendance Update (${data.latestDay.date})`,
         body: notificationBody,
       }];
 
@@ -203,33 +262,25 @@ async function runAttendanceAlerts() {
 }
 
 // 🕒 SCHEDULE THE CRON JOBS (IST Timezone)
-// Runs at 12:40 PM every day
 cron.schedule("40 12 * * *", () => {
   runAttendanceAlerts();
 }, { timezone: "Asia/Kolkata" });
 
-// Runs at 4:00 PM every day
 cron.schedule("0 16 * * *", () => {
   runAttendanceAlerts();
 }, { timezone: "Asia/Kolkata" });
-
 
 // --- ROUTES ---
 app.post("/attendance", async (req, res) => {
   try {
     const { username, password, expoPushToken } = req.body;
 
-    // Fetch data to ensure credentials work and to send back to the app UI
     const data = await getStudentData(username, password);
 
-    // Save/Update user in our test DB if they provided a valid Expo token
     if (expoPushToken && Expo.isExpoPushToken(expoPushToken)) {
       usersDB.set(username, { username, password, expoPushToken });
       console.log(`💾 User ${username} registered for automated alerts.`);
     }
-
-    // Notice: We don't send the push notification here anymore! 
-    // It is exclusively handled by the Cron jobs now.
 
     res.json({ success: true, data });
   } catch (err) {
@@ -250,12 +301,10 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-
-
 // --- MANUAL TEST ROUTE ---
 app.get("/test-alerts", async (req, res) => {
   console.log("🛠️ Manual push notification test triggered!");
-  
+
   if (usersDB.size === 0) {
     return res.json({ 
       success: false, 
@@ -263,15 +312,12 @@ app.get("/test-alerts", async (req, res) => {
     });
   }
 
-  // Force the background job to run right now
   await runAttendanceAlerts();
-  
+
   res.json({ 
     success: true, 
     message: "Test alerts triggered successfully! Check your server console and your phone." 
   });
 });
-
-
 
 module.exports = app;
