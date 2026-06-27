@@ -19,7 +19,7 @@ app.use(express.json());
 const expo = new Expo();
 
 // --- MONGODB SETUP ---
-const MONGO_URI = "mongodb+srv://adepusanjay812_db_user:e4wzvf4v6AeccU3o@cluster0.w0ntbpk.mongodb.net/tkrcet_app?retryWrites=true&w=majority";
+const MONGO_URI = "mongodb+srv://adepusanjay812_db_user:abcd123@cluster0.w0ntbpk.mongodb.net/tkrcet_app?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ MongoDB Connected Successfully"))
