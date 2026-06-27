@@ -288,4 +288,25 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+
+
+// --- MANUAL TEST ROUTE ---
+app.get("/test-alerts", async (req, res) => {
+  console.log("🛠️ Manual push notification test triggered!");
+  
+  // We trigger the function but don't await it so Postman doesn't timeout 
+  // if you have many users in the database (since it waits 2 seconds per user).
+  runAttendanceAlerts();
+
+  res.json({ 
+    success: true, 
+    message: "Test alerts triggered in the background! Check your server console and your phone." 
+  });
+});
+
+
+
+
+
+
 module.exports = app;
