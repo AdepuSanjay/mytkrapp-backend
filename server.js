@@ -3,7 +3,6 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const cors = require("cors");
 const { Expo } = require("expo-server-sdk");
-const cron = require("node-cron");
 const mongoose = require("mongoose");
 
 const app = express();
@@ -18,18 +17,32 @@ app.use(express.json());
 
 const expo = new Expo();
 
-// --- MONGODB SETUP ---
+// --- SERVERLESS MONGODB SETUP ---
 const MONGO_URI = "mongodb+srv://adepusanjay812_db_user:abcd123@cluster0.w0ntbpk.mongodb.net/tkrcet_app?retryWrites=true&w=majority";
 
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB Connected Successfully"))
-  .catch((err) => console.error("❌ MongoDB Connection Error:", err));
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected) {
+    return;
+  }
+  try {
+    const db = await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 5000,
+    });
+    isConnected = db.connections[0].readyState;
+    console.log("✅ MongoDB Connected (Serverless)");
+  } catch (err) {
+    console.error("❌ MongoDB Connection Error:", err);
+    throw err;
+  }
+}
 
 // Define User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  expoPushToken: { type: String, default: null } // Stored to send notifications
+  expoPushToken: { type: String, default: null } 
 });
 
 const User = mongoose.model("User", userSchema);
@@ -188,7 +201,7 @@ async function getStudentData(username, password) {
   };
 }
 
-// --- BACKGROUND CRON JOB LOGIC ---
+// --- ALERT LOGIC ---
 async function runAttendanceAlerts() {
   console.log(`\n⏰ Running Scheduled Attendance Checks... (${new Date().toLocaleTimeString()})`);
 
@@ -207,7 +220,6 @@ async function runAttendanceAlerts() {
 
         const notificationBody = `Overall: ${overall}\n✅ Present: ${uniquePresent}\n❌ Absent: ${uniqueAbsent}`;
 
-        // UPDATE: Added priority and channelId to force background delivery on Android
         const messages = [{
           to: user.expoPushToken,
           sound: "default",
@@ -220,7 +232,7 @@ async function runAttendanceAlerts() {
         await expo.sendPushNotificationsAsync(messages);
         console.log(`✅ Alert sent to ${user.username}`);
 
-        // ⚠️ Wait 2 seconds before next student to prevent college server bans
+        // Wait 2 seconds before next student to prevent college server bans
         await new Promise(resolve => setTimeout(resolve, 2000)); 
 
       } catch (error) {
@@ -232,16 +244,34 @@ async function runAttendanceAlerts() {
   }
 }
 
-cron.schedule("40 12 * * *", () => runAttendanceAlerts(), { timezone: "Asia/Kolkata" });
-cron.schedule("0 16 * * *", () => runAttendanceAlerts(), { timezone: "Asia/Kolkata" });
+// --- VERCEL CRON ROUTE ---
+app.get("/api/cron-alerts", async (req, res) => {
+  try {
+    // Verify the request came from Vercel
+    const authHeader = req.headers.authorization;
+    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    await connectDB();
+    await runAttendanceAlerts();
+    
+    res.json({ success: true, message: "Cron job executed successfully." });
+  } catch (error) {
+    console.error("Cron route error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 
 // --- ROUTES ---
 
 // Login / Fetch Attendance
 app.post("/attendance", async (req, res) => {
   try {
-    const { username, password, expoPushToken } = req.body;
+    await connectDB();
 
+    const { username, password, expoPushToken } = req.body;
     const data = await getStudentData(username, password);
 
     let updateData = { password };
@@ -263,9 +293,11 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
-// Logout (Removes Push Token so they stop getting notifications)
+// Logout 
 app.post("/logout", async (req, res) => {
   try {
+    await connectDB();
+
     const { username } = req.body;
     await User.findOneAndUpdate(
       { username },
@@ -278,8 +310,31 @@ app.post("/logout", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => {
-  res.status(200).json({ success: true, message: "TKRCET Backend is Running on MongoDB!" });
+app.get("/", async (req, res) => {
+  try {
+    await connectDB();
+    res.status(200).json({ success: true, message: "TKRCET Backend is Running on MongoDB!" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Database connection failed" });
+  }
+});
+
+// --- MANUAL TEST ROUTE ---
+app.get("/test-alerts", async (req, res) => {
+  try {
+    console.log("🛠️ Manual push notification test triggered!");
+    await connectDB();
+    
+    // We do NOT await this in the test route so Postman doesn't timeout
+    runAttendanceAlerts();
+
+    res.json({ 
+      success: true, 
+      message: "Test alerts triggered in the background! Check your server console and your phone." 
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Test trigger failed" });
+  }
 });
 
 if (process.env.NODE_ENV !== 'production') {
@@ -287,17 +342,5 @@ if (process.env.NODE_ENV !== 'production') {
     console.log("🚀 Server running on port 3000");
   });
 }
-
-// --- MANUAL TEST ROUTE ---
-app.get("/test-alerts", async (req, res) => {
-  console.log("🛠️ Manual push notification test triggered!");
-
-  runAttendanceAlerts();
-
-  res.json({ 
-    success: true, 
-    message: "Test alerts triggered in the background! Check your server console and your phone." 
-  });
-});
 
 module.exports = app;
