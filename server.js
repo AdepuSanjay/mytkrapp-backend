@@ -193,7 +193,6 @@ async function runAttendanceAlerts() {
   console.log(`\n⏰ Running Scheduled Attendance Checks... (${new Date().toLocaleTimeString()})`);
 
   try {
-    // Only fetch users who have an active push token
     const users = await User.find({ expoPushToken: { $ne: null } });
 
     for (const user of users) {
@@ -208,11 +207,14 @@ async function runAttendanceAlerts() {
 
         const notificationBody = `Overall: ${overall}\n✅ Present: ${uniquePresent}\n❌ Absent: ${uniqueAbsent}`;
 
+        // UPDATE: Added priority and channelId to force background delivery on Android
         const messages = [{
           to: user.expoPushToken,
           sound: "default",
           title: `📊 Attendance Update (${data.latestDay.date})`,
           body: notificationBody,
+          priority: "high",
+          channelId: "default"
         }];
 
         await expo.sendPushNotificationsAsync(messages);
@@ -239,11 +241,9 @@ cron.schedule("0 16 * * *", () => runAttendanceAlerts(), { timezone: "Asia/Kolka
 app.post("/attendance", async (req, res) => {
   try {
     const { username, password, expoPushToken } = req.body;
-    
-    // Attempt scraping first to verify credentials
+
     const data = await getStudentData(username, password);
 
-    // If successful, save/update user in MongoDB
     let updateData = { password };
     if (expoPushToken && Expo.isExpoPushToken(expoPushToken)) {
       updateData.expoPushToken = expoPushToken;
@@ -252,7 +252,7 @@ app.post("/attendance", async (req, res) => {
     await User.findOneAndUpdate(
       { username },
       { $set: updateData },
-      { upsert: true, new: true } // Upsert creates if it doesn't exist
+      { upsert: true, new: true } 
     );
 
     console.log(`💾 User ${username} logged in & saved to DB.`);
@@ -288,14 +288,10 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-
-
 // --- MANUAL TEST ROUTE ---
 app.get("/test-alerts", async (req, res) => {
   console.log("🛠️ Manual push notification test triggered!");
-  
-  // We trigger the function but don't await it so Postman doesn't timeout 
-  // if you have many users in the database (since it waits 2 seconds per user).
+
   runAttendanceAlerts();
 
   res.json({ 
@@ -303,10 +299,5 @@ app.get("/test-alerts", async (req, res) => {
     message: "Test alerts triggered in the background! Check your server console and your phone." 
   });
 });
-
-
-
-
-
 
 module.exports = app;
