@@ -4,9 +4,14 @@ const cheerio = require("cheerio");
 const cors = require("cors");
 const { Expo } = require("expo-server-sdk");
 const mongoose = require("mongoose");
+const { CookieJar } = require("tough-cookie");
+const { wrapper } = require("axios-cookiejar-support");
 
 const app = express();
 
+// ==========================================
+// SERVER CONFIGURATION
+// ==========================================
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -16,16 +21,17 @@ app.use(cors({
 app.use(express.json()); 
 
 const expo = new Expo();
+const ASPNET_BASE_URL = "https://www.tkrcetautonomous.org";
+const PHP_BASE_URL = "http://103.171.190.44/TKRCET";
 
-// --- SERVERLESS MONGODB SETUP ---
+// ==========================================
+// MONGODB DATABASE SETUP
+// ==========================================
 const MONGO_URI = "mongodb+srv://adepusanjay812_db_user:abcd123@cluster0.w0ntbpk.mongodb.net/tkrcet_app?retryWrites=true&w=majority";
-
 let isConnected = false;
 
 async function connectDB() {
-  if (isConnected) {
-    return;
-  }
+  if (isConnected) return;
   try {
     const db = await mongoose.connect(MONGO_URI, {
       serverSelectionTimeoutMS: 5000,
@@ -38,7 +44,6 @@ async function connectDB() {
   }
 }
 
-// Define User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
@@ -47,10 +52,13 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// --- SCRAPING FUNCTION ---
-async function getStudentData(username, password) {
+
+// ==========================================
+// MODULE 1: ATTENDANCE SCRAPER (PHP PORTAL)
+// ==========================================
+async function getAttendanceData(username, password) {
   const loginResponse = await axios.post(
-    "http://103.171.190.44/TKRCET/index.php",
+    `${PHP_BASE_URL}/index.php`,
     new URLSearchParams({ username, password, login: "Login" }),
     {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -60,10 +68,10 @@ async function getStudentData(username, password) {
   );
 
   const cookie = loginResponse.headers["set-cookie"]?.[0];
-  if (!cookie) throw new Error("Login Failed. Please check your credentials.");
+  if (!cookie) throw new Error("Attendance Login Failed. Please check your credentials.");
 
   const pageResponse = await axios.get(
-    "http://103.171.190.44/TKRCET/StudentInformationForStudent.php",
+    `${PHP_BASE_URL}/StudentInformationForStudent.php`,
     { headers: { Cookie: cookie } }
   );
 
@@ -72,7 +80,7 @@ async function getStudentData(username, password) {
 
   const relativePhotoPath = $('img[alt="Student Photo"]').attr('src');
   const photoUrl = relativePhotoPath && !relativePhotoPath.includes('http') 
-    ? `http://103.171.190.44/TKRCET/${relativePhotoPath}` 
+    ? `${PHP_BASE_URL}/${relativePhotoPath}` 
     : relativePhotoPath;
 
   const extractField = (label) => {
@@ -147,15 +155,12 @@ async function getStudentData(username, password) {
 
     if (dateText.match(/\d{2}-\d{2}-\d{4}/)) {
       const periods = [];
-      let rowPresentCount = 0;
-      let rowAbsentCount = 0;
-      let rowTotalPeriods = 0;
+      let rowPresentCount = 0, rowAbsentCount = 0, rowTotalPeriods = 0;
 
       $(cols).slice(2).each((j, td) => {
         const cellText = $(td).text().replace(/\s+/g, ' ').trim();
         const colSpan = parseInt($(td).attr('colspan') || '1', 10);
-        let status = null;
-        let subject = null;
+        let status = null, subject = null;
 
         if (cellText.includes('Present')) { status = 'Present'; rowPresentCount += colSpan; }
         else if (cellText.includes('Absent')) { status = 'Absent'; rowAbsentCount += colSpan; }
@@ -178,8 +183,7 @@ async function getStudentData(username, password) {
     }
   });
 
-  let presentSubjects = [];
-  let absentSubjects = [];
+  let presentSubjects = [], absentSubjects = [];
   if (todayDetails) {
       todayDetails.periods.forEach(p => {
           if (p.status === 'Present') presentSubjects.push(p.subject);
@@ -201,18 +205,199 @@ async function getStudentData(username, password) {
   };
 }
 
-// --- ALERT LOGIC ---
+
+// ==========================================
+// MODULE 2: MARKS & DASHBOARD (ASP.NET PORTAL)
+// ==========================================
+const normalizeString = (str) => {
+    if (!str) return '';
+    return str.replace(/[\s\u00A0\t\n\r]+/g, ' ').trim().toUpperCase();
+};
+
+function parsePortalDashboard(html) {
+    const $ = cheerio.load(html);
+    let photoSrc = $("#ctl00_ImgStudent").attr("src");
+    
+    if (photoSrc) photoSrc = photoSrc.replace(/&amp;/g, '&');
+    
+    const absolutePhotoUrl = photoSrc 
+        ? new URL(photoSrc, `${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx`).href 
+        : null;
+
+    const studentDetails = {
+        name: $("#ctl00_lblStudName").text().trim(),
+        htNo: $("#ctl00_lblHTNo").text().trim(),
+        branch: $("#ctl00_lblBranch").text().trim(),
+        semester: $("#ctl00_lblSem").text().trim(),
+        photoUrl: absolutePhotoUrl 
+    };
+
+    const notifications = [];
+    $("#ctl00_cpStudCorner_grdNotif tr").each((index, element) => {
+        if (index === 0) return; 
+        const tds = $(element).find("td");
+        if (tds.length === 3) {
+            notifications.push({
+                date: $(tds[0]).text().trim(),
+                notificationNo: $(tds[1]).text().trim(),
+                message: $(tds[2]).text().trim()
+            });
+        }
+    });
+
+    return { studentDetails, notifications };
+}
+
+function parseOverallMarksData(html) {
+    const $ = cheerio.load(html);
+    
+    const summary = {
+        cgpa: $("#ctl00_cpStudCorner_lblFinalCGPA").text().split(":").pop().trim() || null,
+        creditsObtained: $("#ctl00_cpStudCorner_lblCreditsObtained").text().split(":").pop().trim() || null,
+        dueSubjects: $("#ctl00_cpStudCorner_lblDueSubjects").text().split(":").pop().trim() || null
+    };
+
+    const marks = [];
+    let targetTable = null;
+    $("table").each((i, el) => {
+        const text = $(el).text();
+        if (text.includes("Subject") && text.includes("Credits") && text.includes("Grade")) {
+            targetTable = $(el);
+        }
+    });
+
+    if (!targetTable) return { summary, marks }; 
+
+    let headers = [];
+    targetTable.find("tr").first().find("th, td").each((i, el) => {
+        headers.push($(el).text().replace(/[\n\r\t]+/g, ' ').trim());
+    });
+
+    targetTable.find("tr").each((index, element) => {
+        if (index === 0) return; 
+        const rowData = {};
+        let isEmptyRow = true;
+
+        $(element).find("td").each((i, el) => {
+            const key = headers[i] || `column_${i}`;
+            const val = $(el).text().replace(/[\n\r\t]+/g, ' ').trim();
+            rowData[key] = val;
+            if (val !== "" && key !== "SlNo") isEmptyRow = false;
+        });
+
+        if (!isEmptyRow && Object.keys(rowData).length > 1) {
+            marks.push({
+                id: rowData["SlNo"],
+                examCode: rowData["Exam Code"],
+                subject: rowData["Subject ( No of Attempts )"],
+                monthYear: rowData["Month & Year"],
+                grade: rowData["FinalGrade"],
+                credits: rowData["Credits"],
+                status: rowData["Status"]
+            });
+        }
+    });
+
+    return { summary, marks };
+}
+
+function parseInternalMarksData(html) {
+    const $ = cheerio.load(html);
+    const marks = [];
+    
+    let targetTable = null;
+    $("table").each((i, el) => {
+        const text = $(el).text();
+        if (text.includes("Exam Code") && text.includes("Subject Name")) targetTable = $(el);
+    });
+
+    if (!targetTable) return marks;
+
+    let headers = [];
+    targetTable.find("tr").first().find("th, td").each((i, el) => {
+        headers.push($(el).text().replace(/[\n\r\t]+/g, ' ').trim());
+    });
+
+    targetTable.find("tr").each((index, element) => {
+        if (index === 0) return; 
+        
+        const rowData = {};
+        let isEmptyRow = true;
+
+        $(element).find("td").each((i, el) => {
+            const key = headers[i] || `column_${i}`;
+            const val = $(el).text().replace(/[\n\r\t]+/g, ' ').trim();
+            rowData[key] = val;
+            if (val !== "" && key !== "SlNo") isEmptyRow = false;
+        });
+
+        if (!isEmptyRow && Object.keys(rowData).length > 1) marks.push(rowData); 
+    });
+
+    return marks;
+}
+
+async function getAuthenticatedClient(username, password) {
+    const jar = new CookieJar();
+    const client = wrapper(axios.create({
+        jar,
+        withCredentials: true,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139 Safari/537.36" }
+    }));
+
+    const page1 = await client.get(`${ASPNET_BASE_URL}/Login.aspx`);
+    let $ = cheerio.load(page1.data);
+
+    const body1 = new URLSearchParams();
+    body1.append("__EVENTTARGET", "lnkStudent");
+    body1.append("__EVENTARGUMENT", "");
+    body1.append("__VIEWSTATE", $("#__VIEWSTATE").val() || "");
+    body1.append("__VIEWSTATEGENERATOR", $("#__VIEWSTATEGENERATOR").val() || "");
+    body1.append("__EVENTVALIDATION", $("#__EVENTVALIDATION").val() || "");
+
+    const page2 = await client.post(`${ASPNET_BASE_URL}/Login.aspx`, body1.toString(), {
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: `${ASPNET_BASE_URL}/Login.aspx`, Origin: ASPNET_BASE_URL }
+    });
+
+    $ = cheerio.load(page2.data);
+
+    const body2 = new URLSearchParams();
+    body2.append("__EVENTTARGET", "");
+    body2.append("__EVENTARGUMENT", "");
+    body2.append("__VIEWSTATE", $("#__VIEWSTATE").val() || "");
+    body2.append("__VIEWSTATEGENERATOR", $("#__VIEWSTATEGENERATOR").val() || "");
+    body2.append("__EVENTVALIDATION", $("#__EVENTVALIDATION").val() || "");
+    body2.append("txtUserId", username);
+    body2.append("txtPwd", password);
+    body2.append("btnLogin", "Login");
+
+    const loginResponse = await client.post(`${ASPNET_BASE_URL}/Login.aspx`, body2.toString(), {
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: `${ASPNET_BASE_URL}/Login.aspx`, Origin: ASPNET_BASE_URL },
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400
+    });
+
+    if (loginResponse.status === 302) {
+        await client.get(`${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx`);
+        return client;
+    }
+    
+    throw new Error("Portal Login failed. Check your credentials.");
+}
+
+
+// ==========================================
+// MODULE 3: PUSH NOTIFICATIONS & CRON
+// ==========================================
 async function runAttendanceAlerts() {
   console.log(`\n⏰ Running Scheduled Attendance Checks... (${new Date().toLocaleTimeString()})`);
-
   try {
     const users = await User.find({ expoPushToken: { $ne: null } });
-
     for (const user of users) {
       try {
         if (!Expo.isExpoPushToken(user.expoPushToken)) continue;
 
-        const data = await getStudentData(user.username, user.password);
+        const data = await getAttendanceData(user.username, user.password);
 
         const uniquePresent = data.latestDay.presentSubjects.join(", ") || "None";
         const uniqueAbsent = data.latestDay.absentSubjects.join(", ") || "None";
@@ -231,8 +416,6 @@ async function runAttendanceAlerts() {
 
         await expo.sendPushNotificationsAsync(messages);
         console.log(`✅ Alert sent to ${user.username}`);
-
-        // Wait 2 seconds before next student to prevent college server bans
         await new Promise(resolve => setTimeout(resolve, 2000)); 
 
       } catch (error) {
@@ -244,103 +427,129 @@ async function runAttendanceAlerts() {
   }
 }
 
-// --- VERCEL CRON ROUTE ---
+
+// ==========================================
+// UNIFIED ROUTES
+// ==========================================
+
+// --- HEALTH & CRON ROUTES ---
+app.get("/", async (req, res) => {
+  try {
+    await connectDB();
+    res.status(200).json({ success: true, message: "Super TKRCET Backend is Running on MongoDB!" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Database connection failed" });
+  }
+});
+
 app.get("/api/cron-alerts", async (req, res) => {
   try {
-    // Verify the request came from Vercel
-    const authHeader = req.headers.authorization;
-    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
-
     await connectDB();
     await runAttendanceAlerts();
-    
     res.json({ success: true, message: "Cron job executed successfully." });
   } catch (error) {
-    console.error("Cron route error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-
-// --- ROUTES ---
-
-// Login / Fetch Attendance
-app.post("/attendance", async (req, res) => {
+app.get("/test-alerts", async (req, res) => {
   try {
     await connectDB();
-
-    const { username, password, expoPushToken } = req.body;
-    const data = await getStudentData(username, password);
-
-    let updateData = { password };
-    if (expoPushToken && Expo.isExpoPushToken(expoPushToken)) {
-      updateData.expoPushToken = expoPushToken;
-    }
-
-    await User.findOneAndUpdate(
-      { username },
-      { $set: updateData },
-      { upsert: true, new: true } 
-    );
-
-    console.log(`💾 User ${username} logged in & saved to DB.`);
-    res.json({ success: true, data });
-
+    runAttendanceAlerts();
+    res.json({ success: true, message: "Test alerts triggered in the background!" });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({ success: false, message: "Test trigger failed" });
   }
 });
 
-// Logout 
 app.post("/logout", async (req, res) => {
   try {
     await connectDB();
-
-    const { username } = req.body;
-    await User.findOneAndUpdate(
-      { username },
-      { $set: { expoPushToken: null } }
-    );
-    console.log(`🚪 User ${username} logged out. Push token removed.`);
+    await User.findOneAndUpdate({ username: req.body.username }, { $set: { expoPushToken: null } });
     res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {
     res.status(500).json({ success: false, message: "Logout failed" });
   }
 });
 
-app.get("/", async (req, res) => {
+// --- ATTENDANCE PORTAL ROUTE ---
+app.post("/attendance", async (req, res) => {
   try {
     await connectDB();
-    res.status(200).json({ success: true, message: "TKRCET Backend is Running on MongoDB!" });
+    const { username, password, expoPushToken } = req.body;
+    const data = await getAttendanceData(username, password);
+
+    let updateData = { password };
+    if (expoPushToken && Expo.isExpoPushToken(expoPushToken)) updateData.expoPushToken = expoPushToken;
+
+    await User.findOneAndUpdate({ username }, { $set: updateData }, { upsert: true, new: true });
+    res.json({ success: true, data });
   } catch (err) {
-    res.status(500).json({ success: false, message: "Database connection failed" });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// --- MANUAL TEST ROUTE ---
-app.get("/test-alerts", async (req, res) => {
-  try {
-    console.log("🛠️ Manual push notification test triggered!");
-    await connectDB();
-    
-    // We do NOT await this in the test route so Postman doesn't timeout
-    runAttendanceAlerts();
+// --- ASP.NET PORTAL ROUTES ---
+app.post("/login", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) return res.status(400).json({ success: false, error: "Missing credentials" });
+        
+        const client = await getAuthenticatedClient(username, password);
+        const dashboardPage = await client.get(`${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx`);
+        const parsedData = parsePortalDashboard(dashboardPage.data);
 
-    res.json({ 
-      success: true, 
-      message: "Test alerts triggered in the background! Check your server console and your phone." 
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Test trigger failed" });
-  }
+        if (parsedData.studentDetails.photoUrl) {
+            try {
+                const imageResponse = await client.get(parsedData.studentDetails.photoUrl, {
+                    responseType: 'arraybuffer',
+                    headers: {
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                        "Referer": `${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx`
+                    }
+                });
+                
+                const contentType = imageResponse.headers['content-type'];
+                if (contentType && contentType.includes('image')) {
+                    const base64Image = Buffer.from(imageResponse.data, 'binary').toString('base64');
+                    parsedData.studentDetails.photoUrl = `data:${contentType};base64,${base64Image}`;
+                } else {
+                    parsedData.studentDetails.photoUrl = null;
+                }
+            } catch (err) {
+                parsedData.studentDetails.photoUrl = null;
+            }
+        }
+        res.json({ success: true, data: parsedData });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(3000, () => {
-    console.log("🚀 Server running on port 3000");
-  });
-}
+app.post("/semesters", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) return res.status(400).json({ success: false, error: "Missing credentials" });
+        const client = await getAuthenticatedClient(username, password);
+        const marksUrl = `${ASPNET_BASE_URL}/StudentLogin/Student/OverallMarksSemwise.aspx`;
+        const page = await client.get(marksUrl, { headers: { Referer: `${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx` } });
+        const $ = cheerio.load(page.data);
+        
+        const semesters = [];
+        $("input[type='submit'], input[type='button']").each((i, el) => {
+            const val = $(el).val();
+            if (val && $(el).attr("name").includes("btn") && val.trim().length > 3) semesters.push(val.trim());
+        });
+        res.json({ success: true, data: semesters });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
-module.exports = app;
+app.post("/marks", async (req, res) => {
+    try {
+        const { username, password, semester } = req.body;
+        if (!username || !password || !semester) return res.status(400).json({ success: false, error: "Missing credentials or semester" });
