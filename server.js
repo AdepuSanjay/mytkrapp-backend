@@ -52,7 +52,6 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-
 // ==========================================
 // MODULE 1: ATTENDANCE SCRAPER (PHP PORTAL)
 // ==========================================
@@ -204,7 +203,6 @@ async function getAttendanceData(username, password) {
     historicalAttendance: fullDaywiseAttendance 
   };
 }
-
 
 // ==========================================
 // MODULE 2: MARKS & DASHBOARD (ASP.NET PORTAL)
@@ -385,7 +383,6 @@ async function getAuthenticatedClient(username, password) {
     throw new Error("Portal Login failed. Check your credentials.");
 }
 
-
 // ==========================================
 // MODULE 3: PUSH NOTIFICATIONS & CRON
 // ==========================================
@@ -426,7 +423,6 @@ async function runAttendanceAlerts() {
     console.error("Database error during cron job:", dbError);
   }
 }
-
 
 // ==========================================
 // UNIFIED ROUTES
@@ -553,3 +549,110 @@ app.post("/marks", async (req, res) => {
     try {
         const { username, password, semester } = req.body;
         if (!username || !password || !semester) return res.status(400).json({ success: false, error: "Missing credentials or semester" });
+
+        const client = await getAuthenticatedClient(username, password);
+        const marksUrl = `${ASPNET_BASE_URL}/StudentLogin/Student/OverallMarksSemwise.aspx`;
+        const page = await client.get(marksUrl, { headers: { Referer: `${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx` } });
+        let $ = cheerio.load(page.data);
+
+        const body = new URLSearchParams();
+        $("input[type='hidden']").each((i, el) => body.append($(el).attr("name"), $(el).val() || ""));
+        body.set("__EVENTTARGET", ""); 
+        body.set("__EVENTARGUMENT", "");
+
+        let foundBtnName = null, foundBtnVal = null;
+        const targetFuzzy = normalizeString(semester).replace(/[^a-zA-Z0-9]/g, "");
+
+        $("input[type='submit'], input[type='button']").each((i, el) => {
+            const val = $(el).val();
+            if (val && $(el).attr("name").includes("btn") && normalizeString(val).replace(/[^a-zA-Z0-9]/g, "") === targetFuzzy) {
+                foundBtnName = $(el).attr("name");
+                foundBtnVal = val; 
+            }
+        });
+
+        if (!foundBtnName) return res.status(404).json({ success: false, error: `Semester '${semester}' not found.` });
+
+        body.append(foundBtnName, foundBtnVal);
+        const marksPost = await client.post(marksUrl, body.toString(), { headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: marksUrl, Origin: ASPNET_BASE_URL }});
+        res.json({ success: true, semester_requested: semester, data: parseOverallMarksData(marksPost.data) });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+app.post("/internal-semesters", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) return res.status(400).json({ success: false, error: "Missing credentials" });
+
+        const client = await getAuthenticatedClient(username, password);
+        const internalUrl = `${ASPNET_BASE_URL}/StudentLogin/Student/InternalMarks.aspx`;
+
+        const page = await client.get(internalUrl, { headers: { Referer: `${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx` } });
+        const $ = cheerio.load(page.data);
+        
+        const semesters = [];
+        $("select option").each((i, el) => {
+            const text = $(el).text().trim();
+            if (text && text.includes("SEMESTER")) semesters.push(text);
+        });
+
+        res.json({ success: true, data: semesters });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+app.post("/internal-marks", async (req, res) => {
+    try {
+        const { username, password, semester } = req.body;
+        if (!username || !password || !semester) return res.status(400).json({ success: false, error: "Missing credentials or semester" });
+
+        const client = await getAuthenticatedClient(username, password);
+        const internalUrl = `${ASPNET_BASE_URL}/StudentLogin/Student/InternalMarks.aspx`;
+
+        const pageGet = await client.get(internalUrl, { headers: { Referer: `${ASPNET_BASE_URL}/StudentLogin/MainStud.aspx` } });
+        let $ = cheerio.load(pageGet.data);
+
+        const body = new URLSearchParams();
+        $("input[type='hidden']").each((i, el) => body.append($(el).attr("name"), $(el).val() || ""));
+
+        let selectName = null, optionValue = null;
+        const targetFuzzy = normalizeString(semester).replace(/[^a-zA-Z0-9]/g, "");
+
+        $("select").each((i, selectEl) => {
+            $(selectEl).find("option").each((j, optEl) => {
+                if (normalizeString($(optEl).text()).replace(/[^a-zA-Z0-9]/g, "") === targetFuzzy) {
+                    selectName = $(selectEl).attr("name"); 
+                    optionValue = $(optEl).val(); 
+                }
+            });
+        });
+
+        if (!selectName || !optionValue) return res.status(404).json({ success: false, error: `Semester '${semester}' not found.` });
+
+        body.set("__EVENTTARGET", selectName); 
+        body.set("__EVENTARGUMENT", "");
+        body.set(selectName, optionValue);
+
+        const marksPost = await client.post(internalUrl, body.toString(), { 
+            headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: internalUrl, Origin: ASPNET_BASE_URL }
+        });
+
+        res.json({ success: true, semester_requested: semester, data: parseInternalMarksData(marksPost.data) });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// ==========================================
+// START SERVER
+// ==========================================
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(3000, () => {
+    console.log("🚀 Unified API Server running on port 3000");
+  });
+}
+
+module.exports = app;
