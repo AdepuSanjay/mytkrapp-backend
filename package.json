@@ -16,6 +16,10 @@
 "mongoose":"^8.9.3",
     "expo-server-sdk": "^3.15.0",
 "cors": "^2.8.6",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "axios-cookiejar-support": "^7.0.0",
+    "tough-cookie": "^6.0.1",
+"qs": "^6.15.3"
+
   }
 }
