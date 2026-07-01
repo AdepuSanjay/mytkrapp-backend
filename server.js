@@ -1,11 +1,9 @@
-import express from "express";
-import axios from "axios";
-import * as cheerio from "cheerio";
-import cors from "cors";
-import { Expo } from "expo-server-sdk";
-import mongoose from "mongoose";
-import { CookieJar } from "tough-cookie";
-import { wrapper } from "axios-cookiejar-support";
+const express = require("express");
+const axios = require("axios");
+const cheerio = require("cheerio");
+const cors = require("cors");
+const { Expo } = require("expo-server-sdk");
+const mongoose = require("mongoose");
 
 const app = express();
 
@@ -204,6 +202,7 @@ async function getAttendanceData(username, password) {
   };
 }
 
+
 // ==========================================
 // MODULE 2: MARKS & DASHBOARD (ASP.NET PORTAL)
 // ==========================================
@@ -335,13 +334,41 @@ function parseInternalMarksData(html) {
     return marks;
 }
 
-async function getAuthenticatedClient(username, password) {
-    const jar = new CookieJar();
-    const client = wrapper(axios.create({
-        jar,
-        withCredentials: true,
+// 🚨 NEW CUSTOM COOKIE CLIENT: Replaces tough-cookie and axios-cookiejar-support!
+function createCookieClient() {
+    const client = axios.create({
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139 Safari/537.36" }
-    }));
+    });
+
+    const cookieStore = {};
+
+    client.interceptors.response.use(response => {
+        const setCookieStr = response.headers['set-cookie'];
+        if (setCookieStr) {
+            setCookieStr.forEach(cookie => {
+                const mainPart = cookie.split(';')[0];
+                const eqIdx = mainPart.indexOf('=');
+                if (eqIdx !== -1) {
+                    cookieStore[mainPart.substring(0, eqIdx).trim()] = mainPart.substring(eqIdx + 1).trim();
+                }
+            });
+        }
+        return response;
+    }, error => Promise.reject(error));
+
+    client.interceptors.request.use(config => {
+        const cookiePairs = Object.keys(cookieStore).map(k => `${k}=${cookieStore[k]}`);
+        if (cookiePairs.length > 0) {
+            config.headers['Cookie'] = cookiePairs.join('; ');
+        }
+        return config;
+    }, error => Promise.reject(error));
+
+    return client;
+}
+
+async function getAuthenticatedClient(username, password) {
+    const client = createCookieClient();
 
     const page1 = await client.get(`${ASPNET_BASE_URL}/Login.aspx`);
     let $ = cheerio.load(page1.data);
@@ -383,6 +410,7 @@ async function getAuthenticatedClient(username, password) {
     throw new Error("Portal Login failed. Check your credentials.");
 }
 
+
 // ==========================================
 // MODULE 3: PUSH NOTIFICATIONS & CRON
 // ==========================================
@@ -423,6 +451,7 @@ async function runAttendanceAlerts() {
     console.error("Database error during cron job:", dbError);
   }
 }
+
 
 // ==========================================
 // UNIFIED ROUTES
@@ -655,6 +684,4 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// ESM Export for Vercel Serverless Functions
-export default app;
- 
+module.exports = app;
