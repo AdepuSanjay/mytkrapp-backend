@@ -1,11 +1,11 @@
-const express = require("express");
-const axios = require("axios");
-const cheerio = require("cheerio");
-const cors = require("cors");
-const { Expo } = require("expo-server-sdk");
-const mongoose = require("mongoose");
-const { CookieJar } = require("tough-cookie");
-// 🚨 REMOVED: require("axios-cookiejar-support") from here!
+import express from "express";
+import axios from "axios";
+import * as cheerio from "cheerio";
+import cors from "cors";
+import { Expo } from "expo-server-sdk";
+import mongoose from "mongoose";
+import { CookieJar } from "tough-cookie";
+import { wrapper } from "axios-cookiejar-support";
 
 const app = express();
 
@@ -204,7 +204,6 @@ async function getAttendanceData(username, password) {
   };
 }
 
-
 // ==========================================
 // MODULE 2: MARKS & DASHBOARD (ASP.NET PORTAL)
 // ==========================================
@@ -336,9 +335,7 @@ function parseInternalMarksData(html) {
     return marks;
 }
 
-// 🚨 THE FIX: Dynamic Import used here instead of require()
 async function getAuthenticatedClient(username, password) {
-    const { wrapper } = await import("axios-cookiejar-support"); // Dynamic ESM Import
     const jar = new CookieJar();
     const client = wrapper(axios.create({
         jar,
@@ -386,7 +383,6 @@ async function getAuthenticatedClient(username, password) {
     throw new Error("Portal Login failed. Check your credentials.");
 }
 
-
 // ==========================================
 // MODULE 3: PUSH NOTIFICATIONS & CRON
 // ==========================================
@@ -427,7 +423,6 @@ async function runAttendanceAlerts() {
     console.error("Database error during cron job:", dbError);
   }
 }
-
 
 // ==========================================
 // UNIFIED ROUTES
@@ -660,4 +655,5 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-module.exports = app;
+// ESM Export for Vercel Serverless Functions
+export default app;
