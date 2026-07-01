@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -12,14 +13,13 @@
   "dependencies": {
     "axios": "^1.18.1",
     "cheerio": "^1.2.0",
-"node-cron": "^4.5.0",
-"mongoose":"^8.9.3",
+    "node-cron": "^4.5.0",
+    "mongoose": "^8.9.3",
     "expo-server-sdk": "^3.15.0",
-"cors": "^2.8.6",
+    "cors": "^2.8.6",
     "express": "^4.21.2",
     "axios-cookiejar-support": "^7.0.0",
     "tough-cookie": "^6.0.1",
-"qs": "^6.15.3"
-
+    "qs": "^6.15.3"
   }
 }
