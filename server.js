@@ -5,7 +5,7 @@ const cors = require("cors");
 const { Expo } = require("expo-server-sdk");
 const mongoose = require("mongoose");
 const { CookieJar } = require("tough-cookie");
-const { wrapper } = require("axios-cookiejar-support");
+// 🚨 REMOVED: require("axios-cookiejar-support") from here!
 
 const app = express();
 
@@ -204,6 +204,7 @@ async function getAttendanceData(username, password) {
   };
 }
 
+
 // ==========================================
 // MODULE 2: MARKS & DASHBOARD (ASP.NET PORTAL)
 // ==========================================
@@ -335,7 +336,9 @@ function parseInternalMarksData(html) {
     return marks;
 }
 
+// 🚨 THE FIX: Dynamic Import used here instead of require()
 async function getAuthenticatedClient(username, password) {
+    const { wrapper } = await import("axios-cookiejar-support"); // Dynamic ESM Import
     const jar = new CookieJar();
     const client = wrapper(axios.create({
         jar,
@@ -383,6 +386,7 @@ async function getAuthenticatedClient(username, password) {
     throw new Error("Portal Login failed. Check your credentials.");
 }
 
+
 // ==========================================
 // MODULE 3: PUSH NOTIFICATIONS & CRON
 // ==========================================
@@ -423,6 +427,7 @@ async function runAttendanceAlerts() {
     console.error("Database error during cron job:", dbError);
   }
 }
+
 
 // ==========================================
 // UNIFIED ROUTES
